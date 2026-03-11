@@ -1,0 +1,17 @@
+name: ppo
+
+max_episodes: 500
+discount_factor: 0.99
+reward_threshold: 475
+ppo_steps: 8
+
+n_trials: 100
+epsilon: 0.2
+entropy_coeff: 0.01
+
+# PPO agent
+propioceptive_dim: 18
+action_dim: 7
+hidden_dim: 256
+use_image: True
+image_channels: 3
