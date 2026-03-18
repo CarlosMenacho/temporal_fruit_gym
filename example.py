@@ -1,7 +1,9 @@
 import gymnasium as gym
 import fruit_gym
-
+import numpy as np
+import torch
 import cv2
+from src.utils import flatten_state
 
 # Create environment
 env = gym.make("PickMultiStrawbEnv", render_mode="human")
@@ -17,7 +19,7 @@ for step in range(500):
 
     obs, reward, terminated, truncated, info = env.step(action)
 
-    # print(obs["state"])
+    print(flatten_state(state=obs["state"], device="cpu").shape)
 
     # tcp_pose [x, y, z, qx, qy, qz, qw]
     #   dz      dy      dx      droll   dpitch  dyaw    dgrasp

@@ -15,3 +15,7 @@ action_dim: 7
 hidden_dim: 256
 use_image: True
 image_channels: 3
+image_size: 128
+
+# Learning rate
+learning_rate: 3e-4

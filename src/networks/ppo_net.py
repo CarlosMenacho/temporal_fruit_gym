@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List
+
+from src.utils import image_to_tensor, flatten_state
 
 
 class PPONetwork(nn.Module):
@@ -11,7 +13,8 @@ class PPONetwork(nn.Module):
                  action_dim: int = 7,
                  hidden_dim: int = 256,
                  use_image: bool = True,
-                 image_channels: int = 3):
+                 image_channels: int = 3,
+                 image_size: int = 128):
         """
         Process: tcp_pose (7) + tcp_vel (6) + gripper_pos (1) + gripper_vec (4)
         """
@@ -21,9 +24,12 @@ class PPONetwork(nn.Module):
         self.use_image = use_image
 
         self.propioceptive_net = nn.Sequential(
-            nn.Linear(propioceptive_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim))
+            nn.Linear(propioceptive_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
 
         if use_image:
             # first using a single image
@@ -42,7 +48,9 @@ class PPONetwork(nn.Module):
                 nn.Flatten(),
             )
 
-            cnn_output_size = 64 * 56 * 56
+            with torch.no_grad():
+                dummy = torch.zeros(1, image_channels, image_size, image_size)
+                cnn_output_size = self.cnn(dummy).shape[1]
 
             self.cnn_fc = nn.Sequential(
                 nn.Linear(cnn_output_size, hidden_dim),
@@ -74,21 +82,23 @@ class PPONetwork(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, obs: Dict) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, obs: torch.Tensor,
+                img: torch.tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass.
         Args:
-            obs: Dictionary with keys:
-                - 'proprioceptive': (batch_size, 18)
-                - 'image': (batch_size, 3, 64, 64) [optional]
+            obs: torch.Tensor 
+                contains all state compressed in a tensor of shape (1,18)
+            img: torch.Tensor
+                contains image tensor from robot
         
         Returns:
             action_mean: (batch_size, 7)
             value: (batch_size, 1)
         """
-        prop_features = self.propioceptive_net(obs["state"])
+        prop_features = self.propioceptive_net(obs)
 
         if self.use_image:
-            image_features = self.cnn(obs["images"]["wrist2"])
+            image_features = self.cnn(img)
             image_features = self.cnn_fc(image_features)
             features = torch.cat([prop_features, image_features], dim=1)
             features = self.fusion(features)
@@ -102,45 +112,31 @@ class PPONetwork(nn.Module):
 
     def get_action_and_value(
         self,
-        obs: Dict,
+        state: torch.Tensor,
+        image: torch.Tensor = None,
         action: torch.Tensor = None,
         deterministic: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Get action, log probability, entropy, and value.
-        
-        Args:
-            obs: Observation dictionary
-            action: Action for probability calculation (optional)
-            deterministic: If True, return mean without noise
-        
+        """Sample or evaluate an action.
+
         Returns:
-            action: Sampled action
-            log_prob: Log probability of action
-            entropy: Action entropy
-            value: Value estimate
+            action: (batch, action_dim)
+            log_prob: (batch,)
+            entropy: (batch,)
+            value: (batch, 1)
         """
-        action_mean, value = self.forward(obs=obs)
+        action_mean, value = self.forward(state, image)
 
-        if deterministic:
-            return action_mean, None, None, value
-
-        # Reparameterization trick for continuous actions
-        std = torch.exp(self.log_std)
-        normal_dist = torch.distributions.Normal(action_mean, std)
+        std = self.log_std.exp().expand_as(action_mean)
+        dist = torch.distributions.Normal(action_mean, std)
 
         if action is None:
-            action = normal_dist.rsample()
+            action = action_mean if deterministic else dist.sample()
 
-        action_squashed = torch.tanh(action)  # [-1, 1]
+        log_prob = dist.log_prob(action).sum(dim=-1)
+        entropy = dist.entropy().sum(dim=-1)
 
-        # calculate log probability with tanh
-        log_prob = normal_dist.log_prob(action)
-        log_prob -= torch.log(1 - action_squashed.pow(2) + 1e-6)
-        log_prob = log_prob.sum(dim=-1, keepdim=True)
-
-        entropy = normal_dist.entropy().sum(dim=-1, keepdim=True)
-
-        return action_squashed, log_prob, entropy, value
+        return action, log_prob, entropy, value
 
 
 class PPOAgent:
@@ -148,6 +144,9 @@ class PPOAgent:
     def __init__(
         self,
         propioceptive_dim: int = 18,
+        hidden_dim: int = 256,
+        image_channels: int = 3,
+        image_size: int = 128,
         action_dim: int = 7,
         use_image: bool = True,
         device: str = "cuda",
@@ -155,18 +154,53 @@ class PPOAgent:
     ):
         self.device = torch.device(device)
         self.action_dim = action_dim
+        self.image_size = image_size
 
         # network
         self.network = PPONetwork(
             propioceptive_dim=propioceptive_dim,
             action_dim=action_dim,
             use_image=use_image,
+            hidden_dim=hidden_dim,
+            image_channels=image_channels,
+            image_size=image_size,
         ).to(self.device)
 
         self.optimizer = torch.optim.Adam(self.network.parameters(),
                                           lr=learning_rate)
 
         self.timesteps = 0
+
+    def calculate_returns(self, rewards: List[float],
+                          discount_factor: float) -> torch.Tensor:
+        returns = []
+        cumulative_rewars = 0
+        for r in reversed(rewards):
+            cumulative_rewars = r + cumulative_rewars * discount_factor
+            returns.insert(0, cumulative_rewars)
+
+        returns = torch.tensor(returns)
+        returns = (returns - returns.mean()) / returns.std()
+        return returns
+
+    def calculate_advantages(self, returns: torch.Tensor,
+                             values: torch.Tensor) -> torch.Tensor:
+        advatages = returns - values
+        advatages = (advatages - advatages.mean()) / advatages.std()
+        return advatages
+
+    def calculate_surrogate_loss(self, actions_log_prob_old: torch.Tensor,
+                                 actions_log_prob_new: torch.Tensor,
+                                 epsilon: float, advantages: torch.Tensor):
+        advantages = advantages.detach()
+        policy_ratio = (actions_log_prob_new - actions_log_prob_old).exp()
+
+        surrogate_loss1 = policy_ratio * advantages
+        surrogate_loss2 = torch.clamp(
+            policy_ratio, min=1.0 - epsilon, max=1.0 + epsilon) * advantages
+
+        surrogate_loss = torch.min(surrogate_loss1, surrogate_loss2)
+        return surrogate_loss
 
     def predict(self, obs: Dict, deterministic: bool = False) -> np.ndarray:
         """Get action from observation.
@@ -178,19 +212,21 @@ class PPOAgent:
         Returns:
             Action as numpy array in [-1, 1]
         """
-        # Conver to tensor
+        obs_tensor = flatten_state(state=obs["state"], device=self.device)
 
-        obs_tensor = {
-            "state": torch.from_numpy(obs["state"]).float().to(self.device)
-        }
-
-        if "image" in obs:
-            obs_tensor["image"] = torch.from_numpy(
-                obs["images"]["wrist2"]).float().to(self.device)
+        image_tensor = None
+        if "images" in obs:
+            image_tensor = image_to_tensor(
+                image=obs["images"]["wrist2"],
+                device=self.device,
+                size=self.image_size,
+            )
 
         with torch.no_grad():
             action, _, _, _ = self.network.get_action_and_value(
-                obs=obs_tensor, deterministic=deterministic)
+                state=obs_tensor,
+                image=image_tensor,
+                deterministic=deterministic)
 
         return action.cpu().numpy().squeeze()
 
@@ -211,8 +247,12 @@ class PPOAgent:
             Dictionary with loss components
         """
 
+        obs_tensor = flatten_state(obs["state"], device=self.device)
+        img_tensor = image_to_tensor(obs["images"]["wrist2"],
+                                     device=self.device)
         action_prob, log_probs, entropy, values = self.network.get_action_and_value(
-            obs=obs,
+            state=obs_tensor,
+            image=img_tensor,
             action=actions,
         )
 
