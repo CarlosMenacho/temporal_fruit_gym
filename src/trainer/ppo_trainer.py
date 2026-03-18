@@ -37,9 +37,11 @@ class PPOTrainer:
         cfg = self.cfg
 
         for episode in range(cfg.algorithm.max_episodes):
-            states, actions, log_probs, values, rewards = self.collect_trajectory()
+            states, actions, log_probs, values, rewards = self.collect_trajectory(
+            )
 
-            returns = self.calculate_returns(rewards, cfg.algorithm.discount_factor).to(self.device)
+            returns = self.calculate_returns(
+                rewards, cfg.algorithm.discount_factor).to(self.device)
             values_tensor = torch.cat(values).squeeze(-1).detach()
             advantages = self.calculate_advantages(returns, values_tensor)
 
@@ -68,11 +70,13 @@ class PPOTrainer:
                          f"reward={episode_reward:.2f} | "
                          f"steps={self.agent.timesteps}")
 
+            if episode % cfg.save_interval == 0 and episode > 0:
+                self.agent.save_checkpoint(f"checkpoints/episode_{episode}.pt")
+                log.info(f"Saved checkpoint at episode {episode}")
+
         self.logger.close()
 
-    def collect_trajectory(
-        self,
-    ) -> Tuple[List, List, List, List, List]:
+    def collect_trajectory(self, ) -> Tuple[List, List, List, List, List]:
         """Run one episode and return collected experience."""
         states, actions, log_probs, values, rewards = [], [], [], [], []
 
@@ -86,7 +90,9 @@ class PPOTrainer:
             obs_tensor = flatten_state(state=obs["state"], device=self.device)
             img_tensor = None
             if self.cfg.algorithm.use_image and "images" in obs:
-                img_tensor = image_to_tensor(obs["images"]["wrist2"], device=self.device, size=self.image_size)
+                img_tensor = image_to_tensor(obs["images"]["wrist2"],
+                                             device=self.device,
+                                             size=self.image_size)
 
             with torch.no_grad():
                 action, log_prob, _, value = self.agent.network.get_action_and_value(
@@ -119,7 +125,8 @@ class PPOTrainer:
         self.agent.network.train()
 
         obs_tensors = torch.cat([s[0] for s in states])
-        img_tensors = torch.cat([s[1] for s in states]) if states[0][1] is not None else None
+        img_tensors = torch.cat([s[1] for s in states
+                                 ]) if states[0][1] is not None else None
 
         _, new_log_probs, entropy, values = self.agent.network.get_action_and_value(
             state=obs_tensors,
@@ -135,7 +142,7 @@ class PPOTrainer:
         surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
 
-        value_loss = 0.5 * ((returns - values.squeeze(-1)) ** 2).mean()
+        value_loss = 0.5 * ((returns - values.squeeze(-1))**2).mean()
         entropy_loss = -entropy.mean()
 
         loss = policy_loss + value_coef * value_loss + entropy_coeff * entropy_loss
@@ -188,5 +195,6 @@ class PPOTrainer:
     def calculate_advantages(self, returns: torch.Tensor,
                              values: torch.Tensor) -> torch.Tensor:
         advantages = returns - values
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = (advantages - advantages.mean()) / (advantages.std() +
+                                                         1e-8)
         return advantages
