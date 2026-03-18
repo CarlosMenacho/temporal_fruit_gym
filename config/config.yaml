@@ -13,6 +13,8 @@ batch_size: 256
 print_interval: 10
 save_interval: 50
 
+render: false
+
 hydra:
   job:
     chdir: true

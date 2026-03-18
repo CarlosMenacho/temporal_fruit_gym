@@ -29,7 +29,8 @@ def main(cfg: DictConfig) -> None:
     logger = Logger(log_dir="tensorboard/")
 
     log.info("Creating environment")
-    env = gym.make("PickMultiStrawbEnv")
+    render_mode = "human" if cfg.render else None
+    env = gym.make("PickMultiStrawbEnv", render_mode=render_mode)
 
     trainer = PPOTrainer(cfg=cfg, logger=logger, env=env, device=str(device))
 

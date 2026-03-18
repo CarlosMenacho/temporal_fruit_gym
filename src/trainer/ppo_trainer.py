@@ -1,3 +1,4 @@
+import os
 import torch
 import logging
 import numpy as np
@@ -71,6 +72,7 @@ class PPOTrainer:
                          f"steps={self.agent.timesteps}")
 
             if episode % cfg.save_interval == 0 and episode > 0:
+                os.makedirs("checkpoints", exist_ok=True)
                 self.agent.save_checkpoint(f"checkpoints/episode_{episode}.pt")
                 log.info(f"Saved checkpoint at episode {episode}")
 
